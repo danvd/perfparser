@@ -15,16 +15,5 @@ set_package_properties(LibRustcDemangle PROPERTIES
         URL "https://github.com/alexcrichton/rustc-demangle"
         TYPE RUNTIME)
 
-find_package(LibDDemangle)
-set_package_properties(LibDDemangle PROPERTIES
-        DESCRIPTION "Demangling for D symbols, written in D."
-        PURPOSE "Demangling of D symbols"
-        URL "https://github.com/lievenhey/d_demangler"
-        TYPE RUNTIME)
-
-include(CheckSymbolExists)
-set(CMAKE_REQUIRED_LIBRARIES elfutils::dw elfutils::elf)
-check_symbol_exists(dwfl_get_debuginfod_client "libdwfl.h" HAVE_DWFL_GET_DEBUGINFOD_CLIENT)
-
 add_subdirectory(app)
 add_subdirectory(tests)
