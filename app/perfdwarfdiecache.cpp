@@ -188,10 +188,7 @@ void prependScopeNames(QByteArray &name, Dwarf_Die *die, QHash<Dwarf_Off, QByteA
 
         auto it = cache.find(scopeOffset);
         if (it != cache.end()) {
-            // prepend the fully qualified cached identifier
-            // that won't end on `::`, so we have to add that manually here
-            if (!name.isEmpty())
-                name.prepend("::");
+            name.prepend("::");
             name.prepend(*it);
             // we can stop, cached names are always fully qualified
             break;
