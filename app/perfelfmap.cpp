@@ -111,7 +111,7 @@ void PerfElfMap::registerElf(quint64 addr, quint64 len, quint64 pgoff,
                                       i->originalFileName, i->originalPath));
         }
 
-        aboutToInvalidate(*i);
+        emit aboutToInvalidate(*i);
         removedElfs.push_back(static_cast<int>(std::distance(m_elfs.begin(), i)));
     }
 
@@ -141,17 +141,24 @@ void PerfElfMap::registerElf(quint64 addr, quint64 len, quint64 pgoff,
 
 PerfElfMap::ElfInfo PerfElfMap::findElf(quint64 ip) const
 {
+    auto exeElf = m_elfs.empty() ? ElfInfo() : m_elfs.first();
+
     auto i = std::upper_bound(m_elfs.begin(), m_elfs.end(), ip, SortByAddr());
     Q_ASSERT (i == m_elfs.constEnd() || i->addr != ip);
     if (i != m_elfs.constBegin())
         --i;
     else
-        return ElfInfo();
+        return exeElf;
+
+    if (!i->localFile.exists() && exeElf.localFile.exists()) {
+        exeElf.isSpecialRegion = true;
+        return exeElf;
+    }
 
     if (i->dwflStart < i->dwflEnd)
-        return (i->dwflStart <= ip && i->dwflEnd > ip) ? *i : ElfInfo();
+        return (i->dwflStart <= ip && i->dwflEnd > ip) ? *i : exeElf;
     else
-        return (i->addr + i->length > ip) ? *i : ElfInfo();
+        return (i->addr + i->length > ip) ? *i : exeElf;
 }
 
 void PerfElfMap::updateElf(quint64 addr, quint64 dwflStart, quint64 dwflEnd)

@@ -28,8 +28,8 @@ quint64 relativeAddress(const PerfElfMap::ElfInfo& elf, quint64 addr)
 {
     Q_ASSERT(elf.isValid());
     const auto elfAddr = elf.hasBaseAddr() ? elf.baseAddr : elf.addr;
-    Q_ASSERT(elfAddr <= addr);
-    Q_ASSERT((elf.addr + elf.length) > addr);
+    //Q_ASSERT(elfAddr <= addr);
+    //Q_ASSERT((elf.addr + elf.length) > addr);
     return addr - elfAddr;
 }
 }

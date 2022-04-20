@@ -744,10 +744,10 @@ static QByteArray fakeSymbolFromSection(Dwfl_Module *mod, Dwarf_Addr addr)
     // mark other entries by section name, see also:
     // http://www.mail-archive.com/elfutils-devel@sourceware.org/msg00019.html
     QByteArray sym = str;
-    sym.prepend('<');
+    sym.prepend('(');
     sym.append('+');
     sym.append(QByteArray::number(quint64(moduleAddr), 16));
-    sym.append('>');
+    sym.append(')');
     return sym;
 }
 
@@ -785,7 +785,7 @@ int PerfSymbolTable::lookupFrame(Dwarf_Addr ip, bool isKernel,
 {
     auto addressCache = m_unwind->addressCache();
 
-    const auto& elf = findElf(ip);
+    const auto elf = findElf(ip);
     auto cached = addressCache->find(elf, ip, &m_invalidAddressCache);
     if (cached.isValid()) {
         *isInterworking = cached.isInterworking;
@@ -886,6 +886,10 @@ int PerfSymbolTable::lookupFrame(Dwarf_Addr ip, bool isKernel,
             addressLocation.parentLocationId = m_unwind->resolveLocation(functionLocation);
         }
 
+        if (symname.isEmpty() && elf.isSpecialRegion) {
+            symname = "(special region)";
+        }
+
         if (!m_unwind->hasSymbol(addressLocation.parentLocationId)) {
             // no sufficient debug information. Use what we already know
             qint32 symId = m_unwind->resolveString(symname);
@@ -909,6 +913,13 @@ int PerfSymbolTable::lookupFrame(Dwarf_Addr ip, bool isKernel,
             functionLocation.address = elfStart;
         addressLocation.parentLocationId = m_unwind->resolveLocation(functionLocation);
         if (!m_unwind->hasSymbol(addressLocation.parentLocationId)) {
+            if (binaryId == -1) {
+                if (m_pid != PerfUnwind::s_kernelPid) {
+                    binaryId = m_unwind->resolveString(QString::number(m_pid).toLocal8Bit());
+                } else {
+                    binaryId = m_unwind->resolveString("[kernel.kallsyms]");
+                }
+            }
             qint32 symId = m_unwind->resolveString(symname);
             m_unwind->resolveSymbol(addressLocation.parentLocationId,
                                     PerfUnwind::Symbol(symId, start, size, binaryId, binaryPathId, actualPathId, isKernel));
