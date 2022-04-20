@@ -243,8 +243,7 @@ PerfUnwind::PerfUnwind(QIODevice *output, const QString &systemRoot, const QStri
     m_output(output), m_architecture(PerfRegisterInfo::ARCH_INVALID), m_systemRoot(systemRoot),
     m_extraLibsPath(extraLibsPath), m_appPath(appPath), m_debugPath(debugPath),
     m_kallsymsPath(QDir::rootPath() + defaultKallsymsPath()), m_ignoreKallsymsBuildId(false),
-    m_lastEventBufferSize(1 << 20), m_maxEventBufferSize(1 << 30), m_targetEventBufferSize(1 << 25),
-    m_eventBufferSize(0), m_timeOrderViolations(0), m_lastFlushMaxTime(0)
+    m_lastFlushMaxTime(0)
 {
     m_stats.enabled = printStats;
     m_currentUnwind.unwind = this;
@@ -299,26 +298,6 @@ PerfUnwind::~PerfUnwind()
     }
 }
 
-void PerfUnwind::setMaxEventBufferSize(uint size)
-{
-    m_maxEventBufferSize = size;
-    if (size < m_targetEventBufferSize)
-        setTargetEventBufferSize(size);
-}
-
-void PerfUnwind::setTargetEventBufferSize(uint size)
-{
-    m_lastEventBufferSize = m_targetEventBufferSize;
-    m_targetEventBufferSize = size;
-    if (size > m_maxEventBufferSize)
-        setMaxEventBufferSize(size);
-}
-
-void PerfUnwind::revertTargetEventBufferSize()
-{
-    setTargetEventBufferSize(m_lastEventBufferSize);
-}
-
 bool PerfUnwind::hasTracePointAttributes() const
 {
     for (auto &attributes : m_attributes) {
@@ -338,7 +317,7 @@ PerfSymbolTable *PerfUnwind::symbolTable(qint32 pid)
 
 void PerfUnwind::registerElf(const PerfRecordMmap &mmap)
 {
-    bufferEvent(mmap, &m_mmapBuffer, &m_stats.numMmapsInRound);
+    bufferEvent(mmap, &m_eventsBuffer, &m_stats.numMmapsInRound);
 }
 
 void PerfUnwind::sendBuffer(const QByteArray &buffer)
@@ -357,7 +336,7 @@ void PerfUnwind::comm(const PerfRecordComm &comm)
 
     bufferEvent(TaskEvent{comm.pid(), comm.tid(), comm.time(), comm.cpu(),
                           Command, commId},
-                &m_taskEventsBuffer, &m_stats.numTaskEventsInRound);
+                &m_eventsBuffer, &m_stats.numTaskEventsInRound);
 }
 
 void PerfUnwind::attr(const PerfRecordAttr &attr)
@@ -384,9 +363,8 @@ void PerfUnwind::addAttributes(const PerfEventAttributes &attributes, const QByt
     }
 
     // Switch to dynamic buffering if it's a trace point
-    if (attributes.type() == PerfEventAttributes::TYPE_TRACEPOINT && m_targetEventBufferSize == 0) {
-        qDebug() << "Trace point attributes detected. Switching to dynamic buffering";
-        revertTargetEventBufferSize();
+    if (attributes.type() == PerfEventAttributes::TYPE_TRACEPOINT) {
+        qDebug() << "Trace point attributes detected. TODO: Switching to dynamic buffering";
     }
 
     if (filteredIds.isEmpty())
@@ -433,7 +411,7 @@ void PerfUnwind::lost(const PerfRecordLost &lost)
 {
     bufferEvent(TaskEvent{lost.pid(), lost.tid(), lost.time(), lost.cpu(),
                           LostDefinition, lost.lost()},
-                &m_taskEventsBuffer, &m_stats.numTaskEventsInRound);
+                &m_eventsBuffer, &m_stats.numTaskEventsInRound);
 }
 
 void PerfUnwind::features(const PerfFeatures &features)
@@ -445,11 +423,10 @@ void PerfUnwind::features(const PerfFeatures &features)
         addAttributes(desc.attrs, desc.name, desc.ids);
 
     const auto perfVersion = QVersionNumber::fromString(QString::fromLatin1(features.version()));
-    if (perfVersion >= QVersionNumber(3, 17) && m_timeOrderViolations == 0) {
+    if (perfVersion >= QVersionNumber(3, 17)) {
         if (!hasTracePointAttributes()) {
             qDebug() << "Linux version" << features.version()
-                     << "detected. Switching to automatic buffering.";
-            setTargetEventBufferSize(0);
+                     << "detected. TODO: Switching to automatic buffering.";
         }
     }
 
@@ -648,7 +625,7 @@ void PerfUnwind::resolveCallchain()
 
 void PerfUnwind::sample(const PerfRecordSample &sample)
 {
-    bufferEvent(sample, &m_sampleBuffer, &m_stats.numSamplesInRound);
+    bufferEvent(sample, &m_eventsBuffer, &m_stats.numSamplesInRound);
 }
 
 template<typename Number>
@@ -823,14 +800,14 @@ void PerfUnwind::fork(const PerfRecordFork &sample)
 {
     bufferEvent(TaskEvent{sample.childPid(), sample.childTid(), sample.time(), sample.cpu(),
                           ThreadStart, sample.parentPid()},
-                &m_taskEventsBuffer, &m_stats.numTaskEventsInRound);
+                &m_eventsBuffer, &m_stats.numTaskEventsInRound);
 }
 
 void PerfUnwind::exit(const PerfRecordExit &sample)
 {
     bufferEvent(TaskEvent{sample.childPid(), sample.childTid(), sample.time(), sample.cpu(),
                           ThreadEnd, {}},
-                &m_taskEventsBuffer, &m_stats.numTaskEventsInRound);
+                &m_eventsBuffer, &m_stats.numTaskEventsInRound);
 }
 
 void PerfUnwind::sendString(qint32 id, const QByteArray& string)
@@ -960,110 +937,95 @@ PerfKallsymEntry PerfUnwind::findKallsymEntry(quint64 address)
 
 void PerfUnwind::finishedRound()
 {
-    if (m_stats.enabled)
-        m_stats.finishedRound();
-
-    // when we parse a perf data stream we may not know whether it contains
-    // FINISHED_ROUND events. now we know, and thus we set the m_maxEventBufferSize
-    // to 0 to disable the heuristic there. Instead, we will now rely on the finished
-    // round events to tell us when to flush the event buffer
-    if (!m_targetEventBufferSize) {
-        // we only flush half of the events we got in this round
-        // this work-arounds bugs in upstream perf which leads to time order violations
-        // across FINISHED_ROUND events which should in theory never happen
-        flushEventBuffer(m_eventBufferSize / 2);
-    } else if (m_timeOrderViolations == 0 && !hasTracePointAttributes()) {
-        qDebug() << "FINISHED_ROUND detected. Switching to automatic buffering";
-        setTargetEventBufferSize(0);
-    }
+     // TODO: implement when ring-buffer dumps are supported
 }
 
 template<typename Event>
-void PerfUnwind::bufferEvent(const Event &event, QList<Event> *buffer, uint *eventCounter)
+void PerfUnwind::bufferEvent(const Event &event, QList<QVariant> *buffer, uint *eventCounter)
 {
-    buffer->append(event);
-    m_eventBufferSize += event.size();
+    buffer->append(QVariant::fromValue(event));
 
     if (m_stats.enabled) {
         *eventCounter += 1;
-        m_stats.maxBufferSize = std::max(m_eventBufferSize, m_stats.maxBufferSize);
+        m_stats.maxBufferSize = 0;
         m_stats.totalEventSizePerRound += event.size();
         m_stats.addEventTime(event.time());
-        // don't return early, stats should include our buffer behavior
     }
-
-    if (m_targetEventBufferSize && m_eventBufferSize > m_targetEventBufferSize)
-        flushEventBuffer(m_targetEventBufferSize / 2);
 }
 
-void PerfUnwind::forwardMmapBuffer(QList<PerfRecordMmap>::Iterator &mmapIt,
-                                   const QList<PerfRecordMmap>::Iterator &mmapEnd,
-                                   quint64 timestamp)
+bool sortByTime(const QVariant& lhs, const QVariant& rhs)
 {
-    for (; mmapIt != mmapEnd && mmapIt->time() <= timestamp; ++mmapIt) {
-        if (!m_stats.enabled) {
-            const auto &buildId = m_buildIds.value(mmapIt->filename());
-            symbolTable(mmapIt->pid())->registerElf(*mmapIt, buildId);
+    auto fnGetTime = [](const QVariant& event) -> quint64 {
+        const auto userType = event.userType();
+        if (userType == qMetaTypeId<PerfRecordSample>()){
+             return reinterpret_cast<const PerfRecordSample *>(event.constData())->time();
+        } else if (userType == qMetaTypeId<PerfRecordMmap>()) {
+            return reinterpret_cast<const PerfRecordMmap *>(event.constData())->time();
+        } else if (userType == qMetaTypeId<PerfUnwind::TaskEvent>()) {
+            return reinterpret_cast<const PerfUnwind::TaskEvent *>(event.constData())->time();
         }
-        m_eventBufferSize -= mmapIt->size();
-    }
+        return 0;
+    };
+
+    return fnGetTime(lhs) < fnGetTime(rhs);
 }
 
-template<typename T>
-bool sortByTime(const T& lhs, const T& rhs)
-{
-    return lhs.time() < rhs.time();
-}
-
-void PerfUnwind::flushEventBuffer(uint desiredBufferSize)
+void PerfUnwind::flushEventBuffer()
 {
     // stable sort here to keep order of events with the same time
     // esp. when we runtime-attach, we will get lots of mmap events with time 0
     // which we must not shuffle
-    std::stable_sort(m_mmapBuffer.begin(), m_mmapBuffer.end(), sortByTime<PerfRecord>);
-    std::stable_sort(m_sampleBuffer.begin(), m_sampleBuffer.end(), sortByTime<PerfRecord>);
-    std::stable_sort(m_taskEventsBuffer.begin(), m_taskEventsBuffer.end(), sortByTime<TaskEvent>);
+    std::stable_sort(m_eventsBuffer.begin(), m_eventsBuffer.end(), sortByTime);
 
     if (m_stats.enabled) {
-        for (const auto &sample : m_sampleBuffer) {
-            if (sample.time() < m_lastFlushMaxTime)
-                ++m_stats.numTimeViolatingSamples;
-            else
-                break;
-        }
-        for (const auto &mmap : m_mmapBuffer) {
-            if (mmap.time() < m_lastFlushMaxTime)
-                ++m_stats.numTimeViolatingMmaps;
-            else
-                break;
+        for (const auto &event : m_eventsBuffer) {
+            if (event.userType() == qMetaTypeId<PerfRecordSample>()){
+                auto& sample = *reinterpret_cast<const PerfRecordSample *>(event.constData());
+                if (sample.time() < m_lastFlushMaxTime)
+                    ++m_stats.numTimeViolatingSamples;
+                else
+                    break;
+            } else if (event.userType() == qMetaTypeId<PerfRecordMmap>()) {
+                auto& mmap = *reinterpret_cast<const PerfRecordMmap *>(event.constData());
+                if (mmap.time() < m_lastFlushMaxTime)
+                    ++m_stats.numTimeViolatingMmaps;
+                else
+                    break;
+            }
         }
     }
 
     bool violatesTimeOrder = false;
-    if (!m_mmapBuffer.isEmpty() && m_mmapBuffer.first().time() < m_lastFlushMaxTime) {
-        // when an mmap event is not following our desired time order, it can
-        // severly break our analysis. as such we report a real error in these cases
-        sendError(TimeOrderViolation,
-                  tr("Time order violation of MMAP event across buffer flush detected. "
-                     "Event time is %1, max time during last buffer flush was %2. "
-                     "This potentially breaks the data analysis.")
-                    .arg(m_mmapBuffer.first().time()).arg(m_lastFlushMaxTime));
-        violatesTimeOrder = true;
-    }
 
-    auto mmapIt = m_mmapBuffer.begin();
-    auto mmapEnd = m_mmapBuffer.end();
+    auto it = m_eventsBuffer.begin();
+    auto itEnd = m_eventsBuffer.end();
 
-    auto sampleIt = m_sampleBuffer.begin();
-    auto sampleEnd = m_sampleBuffer.end();
+    size_t samples = 0, mmaps = 0, taskEvents =0;
 
-    uint bufferSize = m_eventBufferSize;
+    for (; it != itEnd; ++it) {
+        const PerfRecordSample *sample = nullptr;
+        const PerfRecordMmap *mmap = nullptr;
+        const PerfUnwind::TaskEvent *task = nullptr;
+        const auto userType = it->userType();
 
-    auto taskEventIt = m_taskEventsBuffer.begin();
-    auto taskEventEnd = m_taskEventsBuffer.end();
+        if (userType == qMetaTypeId<PerfRecordSample>()){
+            sample =  reinterpret_cast<const PerfRecordSample *>(it->constData());
+            samples++;
+        } else if (userType == qMetaTypeId<PerfRecordMmap>()) {
+            mmap = reinterpret_cast<const PerfRecordMmap *>(it->constData());
+            mmaps++;
+        } else if (userType == qMetaTypeId<PerfUnwind::TaskEvent>()) {
+            task = reinterpret_cast<const PerfUnwind::TaskEvent *>(it->constData());
+            taskEvents++;
+        }
 
-    for (; m_eventBufferSize > desiredBufferSize && sampleIt != sampleEnd; ++sampleIt) {
-        const quint64 timestamp = sampleIt->time();
+        Q_ASSERT(sample || mmap || task);
+        if (!sample && !mmap && !task) {
+            qWarning() << "Unknown event type detected: code update required!";
+            continue;
+        }
+
+        const quint64 timestamp = sample ? sample->time() : mmap ? mmap->time() : task ? task->time() : 0;
 
         if (timestamp < m_lastFlushMaxTime) {
             if (!violatesTimeOrder) {
@@ -1077,95 +1039,50 @@ void PerfUnwind::flushEventBuffer(uint desiredBufferSize)
                 violatesTimeOrder = true;
             }
         } else {
-            // We've forwarded past the violating events as we couldn't do anything about those
-            // anymore. Now break and wait for the larger buffer to fill up, so that we avoid
-            // further violations in the yet to be processed events.
-            if (violatesTimeOrder) {
-                // Process any remaining mmap events violating the previous buffer flush.
-                // Otherwise we would catch the same ones again in the next round.
-                forwardMmapBuffer(mmapIt, mmapEnd, m_lastFlushMaxTime);
-                break;
-            }
-
             m_lastFlushMaxTime = timestamp;
         }
 
-        for (; taskEventIt != taskEventEnd && taskEventIt->time() <= sampleIt->time();
-             ++taskEventIt) {
+        if (task) {
             if (!m_stats.enabled) {
                 // flush the mmap buffer on fork events to allow initialization with the correct state
-                if (taskEventIt->m_type == ThreadStart && taskEventIt->m_pid != taskEventIt->m_payload) {
-                    forwardMmapBuffer(mmapIt, mmapEnd, taskEventIt->time());
-                    const auto childPid = taskEventIt->m_pid;
-                    const auto parentPid = taskEventIt->m_payload.value<qint32>();
+                if (task->m_type == ThreadStart && task->m_pid != task->m_payload) {
+                    const auto childPid = task->m_pid;
+                    const auto parentPid = task->m_payload.value<qint32>();
                     symbolTable(childPid)->initAfterFork(symbolTable(parentPid));
-                } else if (taskEventIt->m_type == ThreadEnd && taskEventIt->m_pid == taskEventIt->m_tid) {
-                    delete m_symbolTables.take(taskEventIt->m_pid);
+                } else if (task->m_type == ThreadEnd && task->m_pid == task->m_tid) {
+                    delete m_symbolTables.take(task->m_pid);
                 }
 
-                sendTaskEvent(*taskEventIt);
+                sendTaskEvent(*task);
             }
-            m_eventBufferSize -= taskEventIt->size();
         }
 
-        forwardMmapBuffer(mmapIt, mmapEnd, timestamp);
-
-        analyze(*sampleIt);
-        m_eventBufferSize -= sampleIt->size();
-    }
-
-    // also flush task events after samples got depleted
-    // this ensures we send all of them, even for situations where the client
-    // application is not CPU-heavy but rather sleeps most of the time
-    for (; m_eventBufferSize > desiredBufferSize && taskEventIt != taskEventEnd; ++taskEventIt) {
-        if (!m_stats.enabled) {
-            sendTaskEvent(*taskEventIt);
+        if (mmap) {
+            if (!m_stats.enabled) {
+                const auto &buildId = m_buildIds.value(mmap->filename());
+                symbolTable(mmap->pid())->registerElf(*mmap, buildId);
+            }
         }
-        m_eventBufferSize -= taskEventIt->size();
+
+        if (sample) {
+            analyze(*sample);
+        }
     }
 
     if (m_stats.enabled) {
         ++m_stats.numBufferFlushes;
-        const auto samples = std::distance(m_sampleBuffer.begin(), sampleIt);
         Q_ASSERT(samples >= 0 && samples < std::numeric_limits<uint>::max());
         m_stats.maxSamplesPerFlush = std::max(static_cast<uint>(samples),
                                               m_stats.maxSamplesPerFlush);
-        const auto mmaps = std::distance(m_mmapBuffer.begin(), mmapIt);
         Q_ASSERT(mmaps >= 0 && mmaps < std::numeric_limits<uint>::max());
         m_stats.maxMmapsPerFlush = std::max(static_cast<uint>(mmaps),
                                             m_stats.maxMmapsPerFlush);
-        const auto taskEvents = std::distance(m_taskEventsBuffer.begin(), taskEventIt);
         Q_ASSERT(taskEvents >= 0 && taskEvents < std::numeric_limits<uint>::max());
         m_stats.maxTaskEventsPerFlush = std::max(static_cast<uint>(taskEvents),
                                                       m_stats.maxTaskEventsPerFlush);
     }
 
-    m_sampleBuffer.erase(m_sampleBuffer.begin(), sampleIt);
-    m_mmapBuffer.erase(m_mmapBuffer.begin(), mmapIt);
-    m_taskEventsBuffer.erase(m_taskEventsBuffer.begin(), taskEventIt);
-
-    if (!violatesTimeOrder)
-        return;
-
-    // Increase buffer size to reduce future time order violations
-    ++m_timeOrderViolations;
-
-    // If we had a larger event buffer before, increase.
-    if (bufferSize < m_lastEventBufferSize)
-        bufferSize = m_lastEventBufferSize;
-
-    // Double the size, clamping by UINT_MAX.
-    if (bufferSize > std::numeric_limits<uint>::max() / 2)
-        bufferSize = std::numeric_limits<uint>::max();
-    else
-        bufferSize *= 2;
-
-    // Clamp by max buffer size.
-    if (bufferSize > m_maxEventBufferSize)
-        bufferSize = m_maxEventBufferSize;
-
-    qDebug() << "Increasing buffer size to" << bufferSize;
-    setTargetEventBufferSize(bufferSize);
+    m_eventsBuffer.clear();
 }
 
 void PerfUnwind::contextSwitch(const PerfRecordContextSwitch& contextSwitch)
@@ -1174,7 +1091,7 @@ void PerfUnwind::contextSwitch(const PerfRecordContextSwitch& contextSwitch)
                 contextSwitch.time(), contextSwitch.cpu(),
                 ContextSwitchDefinition,
                 static_cast<bool>(contextSwitch.misc() & PERF_RECORD_MISC_SWITCH_OUT)},
-                &m_taskEventsBuffer, &m_stats.numTaskEventsInRound);
+                &m_eventsBuffer, &m_stats.numTaskEventsInRound);
 }
 
 void PerfUnwind::sendTaskEvent(const TaskEvent& taskEvent)
