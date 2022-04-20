@@ -219,8 +219,19 @@ static bool findInExtraPath(QFileInfo &path, const QString &fileName)
     return false;
 }
 
-static bool findBuildIdPath(QFileInfo &path, const QString &fileName)
+static bool findBuildIdPath(QFileInfo &path, const QString &fileName, const QString &buildId)
 {
+    if (buildId.size() > 2) { // search by buildId in perf/gdb format
+        const auto buildIdPath = path.absoluteFilePath() + QDir::separator() + QLatin1String(".build-id")
+                    + QDir::separator() + buildId.left(2) + QDir::separator() + buildId.mid(2);
+        path.setFile(buildIdPath);
+        if (path.isFile())
+            return true;
+        path.setFile(buildIdPath + QLatin1String(".debug"));
+        if (path.isFile())
+            return true;
+    }
+
     path.setFile(path.absoluteFilePath() + QDir::separator() + fileName);
     if (path.isFile())
         return true;
@@ -243,11 +254,11 @@ QFileInfo PerfSymbolTable::findFile(const char *path, const QString &fileName,
     QFileInfo fullPath;
     // first try to find the debug information via build id, if available
     if (!buildId.isEmpty()) {
-        const QString buildIdPath = QString::fromUtf8(path) + QDir::separator()
-                + QString::fromUtf8(buildId.toHex());
+        const auto buildIdStr = QString::fromUtf8(buildId.toHex());
+        const QString buildIdPath = QString::fromUtf8(path) + QDir::separator() + buildIdStr;
         foreach (const QString &extraPath, splitPath(m_unwind->debugPath())) {
             fullPath.setFile(extraPath);
-            if (findBuildIdPath(fullPath, buildIdPath))
+            if (findBuildIdPath(fullPath, buildIdPath, buildIdStr))
                 return fullPath;
         }
     }
@@ -744,10 +755,10 @@ static QByteArray fakeSymbolFromSection(Dwfl_Module *mod, Dwarf_Addr addr)
     // mark other entries by section name, see also:
     // http://www.mail-archive.com/elfutils-devel@sourceware.org/msg00019.html
     QByteArray sym = str;
-    sym.prepend('<');
+    sym.prepend('(');
     sym.append('+');
     sym.append(QByteArray::number(quint64(moduleAddr), 16));
-    sym.append('>');
+    sym.append(')');
     return sym;
 }
 
@@ -785,7 +796,7 @@ int PerfSymbolTable::lookupFrame(Dwarf_Addr ip, bool isKernel,
 {
     auto addressCache = m_unwind->addressCache();
 
-    const auto& elf = findElf(ip);
+    const auto elf = findElf(ip);
     auto cached = addressCache->find(elf, ip, &m_invalidAddressCache);
     if (cached.isValid()) {
         *isInterworking = cached.isInterworking;
@@ -886,6 +897,10 @@ int PerfSymbolTable::lookupFrame(Dwarf_Addr ip, bool isKernel,
             addressLocation.parentLocationId = m_unwind->resolveLocation(functionLocation);
         }
 
+        if (symname.isEmpty() && elf.isSpecialRegion) {
+            symname = "(special region)";
+        }
+
         if (!m_unwind->hasSymbol(addressLocation.parentLocationId)) {
             // no sufficient debug information. Use what we already know
             qint32 symId = m_unwind->resolveString(symname);
@@ -909,6 +924,13 @@ int PerfSymbolTable::lookupFrame(Dwarf_Addr ip, bool isKernel,
             functionLocation.address = elfStart;
         addressLocation.parentLocationId = m_unwind->resolveLocation(functionLocation);
         if (!m_unwind->hasSymbol(addressLocation.parentLocationId)) {
+            if (binaryId == -1) {
+                if (m_pid != PerfUnwind::s_kernelPid) {
+                    binaryId = m_unwind->resolveString(QString::number(m_pid).toLocal8Bit());
+                } else {
+                    binaryId = m_unwind->resolveString("[kernel.kallsyms]");
+                }
+            }
             qint32 symId = m_unwind->resolveString(symname);
             m_unwind->resolveSymbol(addressLocation.parentLocationId,
                                     PerfUnwind::Symbol(symId, start, size, binaryId, binaryPathId, actualPathId, isKernel));
