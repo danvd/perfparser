@@ -327,8 +327,6 @@ int main(int argc, char *argv[])
 
     unwind.setIgnoreKallsymsBuildId(parser.isSet(kallsymsPath));
 
-    unwind.setTargetEventBufferSize(targetEventBufferSize);
-    unwind.setMaxEventBufferSize(maxEventBufferSize);
     unwind.setMaxUnwindFrames(maxFramesValue);
 
     PerfHeader header(infile.get());

@@ -167,12 +167,6 @@ public:
     bool ignoreKallsymsBuildId() const { return m_ignoreKallsymsBuildId; }
     void setIgnoreKallsymsBuildId(bool ignore) { m_ignoreKallsymsBuildId = ignore; }
 
-    uint maxEventBufferSize() const { return m_maxEventBufferSize; }
-    void setMaxEventBufferSize(uint size);
-
-    uint targetEventBufferSize() const { return m_targetEventBufferSize; }
-    void setTargetEventBufferSize(uint size);
-
     int maxUnwindFrames() const { return m_currentUnwind.maxFrames; }
     void setMaxUnwindFrames(int maxUnwindFrames) { m_currentUnwind.maxFrames = maxUnwindFrames; }
 
@@ -235,9 +229,21 @@ public:
 
     void finalize()
     {
-        finishedRound();
-        flushEventBuffer(0);
+        flushEventBuffer();
     }
+
+    struct TaskEvent
+    {
+        qint32 m_pid;
+        qint32 m_tid;
+        quint64 m_time;
+        quint32 m_cpu;
+        EventType m_type;
+        QVariant m_payload;
+
+        quint64 time() const { return m_time; }
+        quint64 size() const { return sizeof(TaskEvent); }
+    };
 
 private:
 
@@ -285,19 +291,8 @@ private:
 
     QList<PerfRecordSample> m_sampleBuffer;
     QList<PerfRecordMmap> m_mmapBuffer;
-    struct TaskEvent
-    {
-        qint32 m_pid;
-        qint32 m_tid;
-        quint64 m_time;
-        quint32 m_cpu;
-        EventType m_type;
-        QVariant m_payload;
 
-        quint64 time() const { return m_time; }
-        quint64 size() const { return sizeof(TaskEvent); }
-    };
-    QList<TaskEvent> m_taskEventsBuffer;
+    QList<QVariant> m_eventsBuffer;
     QHash<qint32, PerfSymbolTable *> m_symbolTables;
     PerfKallsyms m_kallsyms;
     PerfAddressCache m_addressCache;
@@ -309,13 +304,6 @@ private:
     QHash<quint64, qint32> m_attributeIds;
     QVector<PerfEventAttributes> m_attributes;
     QHash<QByteArray, QByteArray> m_buildIds;
-
-    uint m_lastEventBufferSize;
-    uint m_maxEventBufferSize;
-    uint m_targetEventBufferSize;
-    uint m_eventBufferSize;
-
-    uint m_timeOrderViolations;
 
     quint64 m_lastFlushMaxTime;
     QSysInfo::Endian m_byteOrder = QSysInfo::LittleEndian;
@@ -334,16 +322,14 @@ private:
     void sendTaskEvent(const TaskEvent &taskEvent);
 
     template<typename Event>
-    void bufferEvent(const Event &event, QList<Event> *buffer, uint *eventCounter);
-    void flushEventBuffer(uint desiredBufferSize);
+    void bufferEvent(const Event &event, QList<QVariant> *buffer, uint *eventCounter);
+    void flushEventBuffer();
 
     QVariant readTraceData(const QByteArray &data, const FormatField &field, bool byteSwap);
-    void forwardMmapBuffer(QList<PerfRecordMmap>::Iterator &it,
-                           const QList<PerfRecordMmap>::Iterator &mmapEnd,
-                           quint64 timestamp);
-    void revertTargetEventBufferSize();
     bool hasTracePointAttributes() const;
 };
+
+Q_DECLARE_METATYPE(PerfUnwind::TaskEvent);
 
 uint qHash(const PerfUnwind::Location &location, uint seed = 0);
 bool operator==(const PerfUnwind::Location &a, const PerfUnwind::Location &b);

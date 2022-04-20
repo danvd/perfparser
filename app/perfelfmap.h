@@ -87,6 +87,8 @@ public:
         quint64 baseAddr = INVALID_BASE_ADDR;
         quint64 dwflStart = 0;
         quint64 dwflEnd = 0;
+
+        bool isSpecialRegion = false;
     };
 
     explicit PerfElfMap(QObject *parent = nullptr);
