@@ -236,7 +236,7 @@ QByteArray demangle(const QByteArray &mangledName)
     if (mangledName.length() < 3) {
         return mangledName;
     } else {
-        static size_t demangleBufferLength = 1024;
+        static size_t demangleBufferLength = 8192;
         static char *demangleBuffer = reinterpret_cast<char *>(eu_compat_malloc(demangleBufferLength));
         static Demangler demangler;
 
